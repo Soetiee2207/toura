@@ -111,3 +111,42 @@ export async function getExperienceDetail(slug: string): Promise<ExperienceDetai
     })),
   };
 }
+
+export type SessionForBooking = {
+  sessionId: string;
+  experienceTitle: string;
+  experienceSlug: string;
+  meetingPoint: string;
+  startsAtLabel: string;
+  price: number;
+  seatsLeft: number;
+};
+
+// Thông tin 1 buổi để hiển thị trên trang đặt chỗ. null nếu buổi không còn đặt được.
+// Chỉ để HIỂN THỊ — lúc tạo đơn, lib/booking.ts sẽ kiểm tra lại mọi điều kiện trong transaction.
+export async function getSessionForBooking(sessionId: string): Promise<SessionForBooking | null> {
+  await connection();
+
+  const session = await prisma.session.findFirst({
+    where: { id: sessionId, ...bookableSessionWhere(new Date()), experience: { isPublished: true } },
+    select: {
+      id: true,
+      startsAt: true,
+      price: true,
+      capacity: true,
+      seatsBooked: true,
+      experience: { select: { title: true, slug: true, meetingPoint: true } },
+    },
+  });
+  if (!session) return null;
+
+  return {
+    sessionId: session.id,
+    experienceTitle: session.experience.title,
+    experienceSlug: session.experience.slug,
+    meetingPoint: session.experience.meetingPoint,
+    startsAtLabel: formatDateTimeVN(session.startsAt),
+    price: session.price,
+    seatsLeft: session.capacity - session.seatsBooked,
+  };
+}
