@@ -4,9 +4,9 @@ services:
     container_name: toura-db
     restart: unless-stopped        # tự khởi động lại nếu bị crash
     environment:                   # biến môi trường, Postgres đọc để tạo DB lần đầu
-      POSTGRES_USER: toura
-      POSTGRES_PASSWORD: toura_dev_pw
-      POSTGRES_DB: toura
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - "5432:5432"                # cổng máy bạn : cổng trong container
     volumes:
