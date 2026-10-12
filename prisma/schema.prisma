@@ -125,6 +125,7 @@ model Session {
 model Booking {
   id              String        @id @default(uuid()) @db.Uuid
   code            String        @unique // mã ngắn cho khách: TRA-7X3K9
+  idempotencyKey  String?       @unique @map("idempotency_key") @db.Uuid // chống tạo đơn trùng khi gửi lặp
   sessionId       String        @map("session_id") @db.Uuid
   contactName     String        @map("contact_name")
   contactEmail    String        @map("contact_email")

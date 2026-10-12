@@ -16,18 +16,23 @@ export type BookingFormState = {
 
 export async function submitBooking(_prev: BookingFormState, formData: FormData): Promise<BookingFormState> {
   const raw = Object.fromEntries(
-    ["sessionId", "quantity", "contactName", "contactEmail", "contactPhone"].map((k) => [k, String(formData.get(k) ?? "")]),
+    ["idempotencyKey", "sessionId", "quantity", "contactName", "contactEmail", "contactPhone"].map((k) => [k, String(formData.get(k) ?? "")]),
   );
 
   // 1. VALIDATE — dữ liệu từ trình duyệt không bao giờ được tin
   const parsed = createBookingSchema.safeParse(raw);
   if (!parsed.success) {
     const fieldErrors: BookingFormState["fieldErrors"] = {};
+    let formError: string | undefined;
     for (const issue of parsed.error.issues) {
-      const field = issue.path[0] as keyof NonNullable<BookingFormState["fieldErrors"]>;
-      fieldErrors[field] ??= issue.message; // giữ lỗi đầu tiên của mỗi ô
+      const field = issue.path[0];
+      if (field === "idempotencyKey" || field === "sessionId") {
+        formError ??= issue.message; // trường ẩn, khách không sửa được → báo lỗi chung
+        continue;
+      }
+      fieldErrors[field as keyof typeof fieldErrors] ??= issue.message; // giữ lỗi đầu tiên của mỗi ô
     }
-    return { fieldErrors, values: raw };
+    return { formError, fieldErrors, values: raw };
   }
 
   // 2. GỌI TẦNG NGHIỆP VỤ — mọi quy tắc nằm trong lib/booking.ts

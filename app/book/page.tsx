@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import Link from "next/link";
 import { Suspense } from "react";
 import { getSessionForBooking } from "@/lib/catalog";
@@ -25,6 +26,10 @@ async function BookContent({ searchParams }: { searchParams: PageProps<"/book">[
   // UUID sai định dạng → khỏi hỏi DB (Postgres sẽ báo lỗi kiểu dữ liệu)
   const isUuid = /^[0-9a-f-]{36}$/i.test(sessionId);
   const session = isUuid ? await getSessionForBooking(sessionId) : null;
+
+  // Mỗi lần MỞ trang đặt chỗ = một "ý định đặt" mới → một idempotency key mới.
+  // Gửi form nhiều lần (bấm 2 lần, F5 khi đang gửi...) đều mang CÙNG key này → server chỉ tạo 1 đơn.
+  const idempotencyKey = randomUUID();
 
   if (!session) {
     return (
@@ -57,6 +62,7 @@ async function BookContent({ searchParams }: { searchParams: PageProps<"/book">[
 
       <section className="rounded-xl border border-stone-200 bg-white p-5">
         <BookingForm
+          idempotencyKey={idempotencyKey}
           sessionId={session.sessionId}
           price={session.price}
           seatsLeft={session.seatsLeft}

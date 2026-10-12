@@ -7,7 +7,7 @@ import type { CreateBookingInput } from "@/lib/booking-schema";
 
 // Lỗi nghiệp vụ "dự kiến được" (hết chỗ, buổi đã đóng...) → trang hiển thị thông báo thân thiện.
 // Phân biệt với lỗi bất ngờ (DB sập, bug) → trang báo lỗi chung.
-export type BookingErrorCode = "SESSION_NOT_AVAILABLE" | "NOT_ENOUGH_SEATS";
+export type BookingErrorCode = "SESSION_NOT_AVAILABLE" | "NOT_ENOUGH_SEATS" | "IDEMPOTENCY_CONFLICT";
 
 export class BookingError extends Error {
   constructor(
@@ -33,16 +33,51 @@ function generateBookingCode(): string {
 }
 
 export async function createBooking(input: CreateBookingInput): Promise<{ code: string }> {
-  // Mã đơn ngẫu nhiên có thể trùng (xác suất cực nhỏ) → DB báo vi phạm UNIQUE → thử lại với mã khác.
+  // IDEMPOTENCY: cùng 1 idempotencyKey gửi lại (bấm 2 lần, mạng chập chờn, gửi lặp bằng Postman...)
+  // → trả về ĐƠN CŨ, không tạo đơn mới, không giữ thêm chỗ.
+  const replay = await findReplay(input);
+  if (replay) return replay;
+
   for (let attempt = 1; ; attempt++) {
     try {
       return await createBookingOnce(input, generateBookingCode());
     } catch (e) {
-      const isCodeCollision =
-        e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002" && attempt < 3;
-      if (!isCodeCollision) throw e;
+      if (!isUniqueViolation(e)) throw e;
+      // Vi phạm UNIQUE có 2 khả năng:
+      //  (a) một request SONG SONG cùng idempotencyKey vừa tạo đơn xong trước mình → trả về đơn đó
+      //  (b) mã đơn ngẫu nhiên bị trùng (cực hiếm) → thử lại với mã khác
+      // Transaction của mình đã ROLLBACK nên chỗ đã giữ cũng được trả lại tự động.
+      const replay = await findReplay(input);
+      if (replay) return replay;
+      if (attempt >= 3) throw e;
     }
   }
+}
+
+function isUniqueViolation(e: unknown) {
+  return e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002";
+}
+
+// Tìm đơn đã tạo bằng cùng idempotencyKey.
+// Cùng key nhưng KHÁC nội dung (buổi, số người, email) → không phải "gửi lặp" mà là dùng sai key → báo lỗi.
+async function findReplay(input: CreateBookingInput): Promise<{ code: string } | null> {
+  const existing = await prisma.booking.findUnique({
+    where: { idempotencyKey: input.idempotencyKey },
+    select: { code: true, sessionId: true, quantity: true, contactEmail: true },
+  });
+  if (!existing) return null;
+
+  const samePayload =
+    existing.sessionId === input.sessionId &&
+    existing.quantity === input.quantity &&
+    existing.contactEmail === input.contactEmail;
+  if (!samePayload) {
+    throw new BookingError(
+      "IDEMPOTENCY_CONFLICT",
+      "Phiên đặt chỗ này đã được dùng cho một đơn khác. Bạn vui lòng tải lại trang và đặt lại.",
+    );
+  }
+  return { code: existing.code };
 }
 
 async function createBookingOnce(input: CreateBookingInput, code: string) {
@@ -99,6 +134,7 @@ async function createBookingOnce(input: CreateBookingInput, code: string) {
     const booking = await tx.booking.create({
       data: {
         code,
+        idempotencyKey: input.idempotencyKey,
         sessionId,
         contactName: input.contactName,
         contactEmail: input.contactEmail,

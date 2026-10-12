@@ -14,6 +14,8 @@ const vnPhone = z
   .transform((s) => s.replace(/^\+84/, "0")); // chuẩn hoá về dạng 0xxxxxxxxx
 
 export const createBookingSchema = z.object({
+  // Mã do server sinh sẵn khi mở trang đặt chỗ, form gửi kèm. Gửi lặp cùng mã → không tạo đơn mới.
+  idempotencyKey: z.uuid("Phiên đặt chỗ không hợp lệ, vui lòng tải lại trang"),
   sessionId: z.uuid("Buổi tổ chức không hợp lệ"),
   quantity: z.coerce // dữ liệu form luôn là chuỗi → ép sang số
     .number("Số người không hợp lệ")

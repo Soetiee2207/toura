@@ -4,6 +4,11 @@ import { prisma } from "@/lib/prisma";
 
 const contact = { contactName: "Khách Test", contactEmail: "test@example.com", contactPhone: "0901234567" };
 
+// Mỗi lần gọi = một "ý định đặt" mới → key mới (giống mỗi lần khách mở trang /book)
+function input(sessionId: string, quantity: number, idempotencyKey: string = crypto.randomUUID()) {
+  return { idempotencyKey, sessionId, quantity, ...contact };
+}
+
 // Mỗi test tự tạo dữ liệu riêng: 1 experience + 1 session với số chỗ cho trước
 async function createSession(opts: { capacity: number; price?: number; startsInHours?: number; status?: "OPEN" | "CLOSED"; published?: boolean }) {
   const exp = await prisma.experience.create({
@@ -46,7 +51,7 @@ describe("createBooking — luồng cơ bản", () => {
   it("tạo đơn PENDING, giữ chỗ, snapshot giá và ghi lịch sử", async () => {
     const session = await createSession({ capacity: 10, price: 350_000 });
 
-    const { code } = await createBooking({ sessionId: session.id, quantity: 2, ...contact });
+    const { code } = await createBooking(input(session.id, 2));
 
     expect(code).toMatch(/^TRA-[A-Z2-9]{6}$/);
     const booking = await prisma.booking.findUniqueOrThrow({ where: { code }, include: { statusHistory: true } });
@@ -62,7 +67,7 @@ describe("createBooking — luồng cơ bản", () => {
 
   it("giá đổi sau khi đặt KHÔNG làm thay đổi đơn cũ (snapshot)", async () => {
     const session = await createSession({ capacity: 10, price: 350_000 });
-    const { code } = await createBooking({ sessionId: session.id, quantity: 1, ...contact });
+    const { code } = await createBooking(input(session.id, 1));
 
     await prisma.session.update({ where: { id: session.id }, data: { price: 400_000 } });
 
@@ -73,7 +78,7 @@ describe("createBooking — luồng cơ bản", () => {
   it("từ chối khi không đủ chỗ, và KHÔNG trừ chỗ", async () => {
     const session = await createSession({ capacity: 3 });
 
-    await expect(createBooking({ sessionId: session.id, quantity: 4, ...contact })).rejects.toMatchObject({
+    await expect(createBooking(input(session.id, 4))).rejects.toMatchObject({
       code: "NOT_ENOUGH_SEATS",
     });
     const after = await prisma.session.findUniqueOrThrow({ where: { id: session.id } });
@@ -87,7 +92,7 @@ describe("createBooking — luồng cơ bản", () => {
   ])("từ chối khi %s", async (_label, opts) => {
     const session = await createSession({ capacity: 10, ...opts });
 
-    const err = await createBooking({ sessionId: session.id, quantity: 1, ...contact }).catch((e) => e);
+    const err = await createBooking(input(session.id, 1)).catch((e) => e);
     expect(err).toBeInstanceOf(BookingError);
     expect(err.code).toBe("SESSION_NOT_AVAILABLE");
     expect(await prisma.booking.count()).toBe(0);
@@ -100,7 +105,7 @@ describe("createBooking — CẠNH TRANH CHỖ (tiêu chí hoàn thành của đ
 
     // Bắn 20 yêu cầu CÙNG LÚC (Promise.allSettled: chờ tất cả xong, kể cả cái bị lỗi)
     const results = await Promise.allSettled(
-      Array.from({ length: 20 }, () => createBooking({ sessionId: session.id, quantity: 1, ...contact })),
+      Array.from({ length: 20 }, () => createBooking(input(session.id, 1))),
     );
 
     const ok = results.filter((r) => r.status === "fulfilled");
@@ -121,7 +126,7 @@ describe("createBooking — CẠNH TRANH CHỖ (tiêu chí hoàn thành của đ
     const quantities = [3, 4, 2, 5, 1, 3, 2, 4, 1, 2]; // tổng 27, chỉ có 10 chỗ
 
     await Promise.allSettled(
-      quantities.map((quantity) => createBooking({ sessionId: session.id, quantity, ...contact })),
+      quantities.map((quantity) => createBooking(input(session.id, quantity))),
     );
 
     const after = await prisma.session.findUniqueOrThrow({ where: { id: session.id } });
@@ -130,5 +135,50 @@ describe("createBooking — CẠNH TRANH CHỖ (tiêu chí hoàn thành của đ
     expect(after.seatsBooked).toBeLessThanOrEqual(10);
     // seats_booked phải KHỚP với tổng vé trong bảng bookings (không lệch "hai nguồn sự thật")
     expect(sold._sum.quantity ?? 0).toBe(after.seatsBooked);
+  });
+});
+
+describe("createBooking — IDEMPOTENCY (gửi lặp cùng một yêu cầu)", () => {
+  it("gửi lại cùng key → trả về ĐƠN CŨ, không tạo đơn mới, không giữ thêm chỗ", async () => {
+    const session = await createSession({ capacity: 10 });
+    const key = crypto.randomUUID();
+
+    const first = await createBooking(input(session.id, 2, key));
+    const second = await createBooking(input(session.id, 2, key));
+
+    expect(second.code).toBe(first.code);
+    expect(await prisma.booking.count()).toBe(1);
+    const after = await prisma.session.findUniqueOrThrow({ where: { id: session.id } });
+    expect(after.seatsBooked).toBe(2); // KHÔNG phải 4
+  });
+
+  it("10 request cùng key gửi ĐỒNG THỜI → chỉ 1 đơn, tất cả nhận cùng một mã đơn", async () => {
+    const session = await createSession({ capacity: 10 });
+    const key = crypto.randomUUID();
+
+    const results = await Promise.all(Array.from({ length: 10 }, () => createBooking(input(session.id, 2, key))));
+
+    expect(new Set(results.map((r) => r.code)).size).toBe(1);
+    expect(await prisma.booking.count()).toBe(1);
+    const after = await prisma.session.findUniqueOrThrow({ where: { id: session.id } });
+    expect(after.seatsBooked).toBe(2); // các transaction bị trùng key đã ROLLBACK → trả lại chỗ
+  });
+
+  it("cùng key nhưng KHÁC nội dung (đổi số người) → từ chối, không tạo đơn thứ hai", async () => {
+    const session = await createSession({ capacity: 10 });
+    const key = crypto.randomUUID();
+    await createBooking(input(session.id, 2, key));
+
+    await expect(createBooking(input(session.id, 5, key))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(await prisma.booking.count()).toBe(1);
+  });
+
+  it("key khác nhau → là 2 đơn hợp lệ khác nhau", async () => {
+    const session = await createSession({ capacity: 10 });
+
+    await createBooking(input(session.id, 1));
+    await createBooking(input(session.id, 1));
+
+    expect(await prisma.booking.count()).toBe(2);
   });
 });

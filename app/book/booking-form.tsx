@@ -7,13 +7,14 @@ import { formatVND } from "@/lib/format";
 import { submitBooking, type BookingFormState } from "./actions";
 
 type Props = {
+  idempotencyKey: string; // server sinh sẵn — xem app/book/page.tsx
   sessionId: string;
   price: number; // chỉ để HIỂN THỊ tổng tiền tạm tính
   seatsLeft: number;
   initialQuantity: number;
 };
 
-export function BookingForm({ sessionId, price, seatsLeft, initialQuantity }: Props) {
+export function BookingForm({ idempotencyKey, sessionId, price, seatsLeft, initialQuantity }: Props) {
   // useActionState: gắn Server Action vào form, nhận lại state (lỗi) và cờ pending (đang gửi)
   const [state, formAction, pending] = useActionState<BookingFormState, FormData>(submitBooking, {});
   const maxQuantity = Math.min(seatsLeft, MAX_TICKETS_PER_BOOKING);
@@ -24,6 +25,7 @@ export function BookingForm({ sessionId, price, seatsLeft, initialQuantity }: Pr
 
   return (
     <form action={formAction} className="space-y-4" noValidate>
+      <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
       <input type="hidden" name="sessionId" value={sessionId} />
 
       {state.formError && (
