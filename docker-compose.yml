@@ -1,0 +1,16 @@
+services:
+  db:                              # tên service, tự đặt
+    image: postgres:17-alpine      # image Postgres bản 17, loại alpine cho nhẹ
+    container_name: toura-db
+    restart: unless-stopped        # tự khởi động lại nếu bị crash
+    environment:                   # biến môi trường, Postgres đọc để tạo DB lần đầu
+      POSTGRES_USER: toura
+      POSTGRES_PASSWORD: toura_dev_pw
+      POSTGRES_DB: toura
+    ports:
+      - "5432:5432"                # cổng máy bạn : cổng trong container
+    volumes:
+      - toura_pgdata:/var/lib/postgresql/data   # lưu dữ liệu ra ngoài container
+
+volumes:
+  toura_pgdata:
