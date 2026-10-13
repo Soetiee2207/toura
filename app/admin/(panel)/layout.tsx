@@ -15,6 +15,9 @@ export default function AdminPanelLayout({ children }: LayoutProps<"/admin">) {
             <Link href="/admin" className="hover:text-stone-900">
               Tổng quan
             </Link>
+            <Link href="/admin/bookings" className="hover:text-stone-900">
+              Đơn đặt chỗ
+            </Link>
           </nav>
           <div className="ml-auto">
             <Suspense fallback={null}>

@@ -1,8 +1,9 @@
+import Link from "next/link";
 import { Suspense } from "react";
 import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
-// /admin — trang tổng quan. Bước sau sẽ thêm trang quản lý đơn.
+// /admin — trang tổng quan. Bấm vào từng ô → danh sách đơn đã lọc theo trạng thái.
 export default function AdminHomePage() {
   return (
     <Suspense fallback={<div className="h-40 animate-pulse rounded-xl bg-stone-200" />}>
@@ -21,20 +22,25 @@ async function Overview() {
     <div>
       <h1 className="text-2xl font-bold tracking-tight">Xin chào, {user.name}</h1>
       <ul className="mt-6 grid gap-4 sm:grid-cols-4">
-        <Stat label="Đang giữ chỗ" value={count("PENDING")} accent="text-amber-700" />
-        <Stat label="Đã xác nhận" value={count("CONFIRMED")} accent="text-emerald-700" />
-        <Stat label="Đã huỷ" value={count("CANCELLED")} accent="text-stone-600" />
-        <Stat label="Hết hạn" value={count("EXPIRED")} accent="text-stone-600" />
+        <Stat label="Đang giữ chỗ" status="PENDING" value={count("PENDING")} accent="text-amber-700" />
+        <Stat label="Đã xác nhận" status="CONFIRMED" value={count("CONFIRMED")} accent="text-emerald-700" />
+        <Stat label="Đã huỷ" status="CANCELLED" value={count("CANCELLED")} accent="text-stone-600" />
+        <Stat label="Hết hạn" status="EXPIRED" value={count("EXPIRED")} accent="text-stone-600" />
       </ul>
     </div>
   );
 }
 
-function Stat({ label, value, accent }: { label: string; value: number; accent: string }) {
+function Stat({ label, status, value, accent }: { label: string; status: string; value: number; accent: string }) {
   return (
-    <li className="rounded-xl border border-stone-200 bg-white p-4">
-      <p className="text-sm text-stone-500">{label}</p>
-      <p className={`mt-1 text-3xl font-bold ${accent}`}>{value}</p>
+    <li>
+      <Link
+        href={`/admin/bookings?status=${status}`}
+        className="block rounded-xl border border-stone-200 bg-white p-4 hover:border-stone-400"
+      >
+        <p className="text-sm text-stone-500">{label}</p>
+        <p className={`mt-1 text-3xl font-bold ${accent}`}>{value}</p>
+      </Link>
     </li>
   );
 }
