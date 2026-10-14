@@ -2,10 +2,15 @@
 // File này KHÔNG tự kiểm tra đăng nhập — Server Action gọi requireUser() rồi truyền "actor" (ai đang làm) vào đây.
 // Nhưng QUY TẮC NGHIỆP VỤ (trạng thái nào được sang trạng thái nào, vai trò nào được làm gì) nằm ở đây → test được.
 import { Prisma } from "@/generated/prisma/client";
-import type { BookingStatus, UserRole } from "@/generated/prisma/enums";
+import type { ActorType, BookingStatus, UserRole } from "@/generated/prisma/enums";
 import { prisma } from "@/lib/prisma";
 
 export type Actor = { id: string; role: UserRole };
+
+// Ai thực hiện thay đổi — để ghi lịch sử/audit log. Nhân viên có userId; hệ thống (job tự động) thì không.
+type ActorRef = { type: ActorType; userId: string | null };
+const staffRef = (a: Actor): ActorRef => ({ type: a.role, userId: a.id });
+const SYSTEM: ActorRef = { type: "SYSTEM", userId: null };
 
 // ── MÁY TRẠNG THÁI ─────────────────────────────────────────
 // Trạng thái hiện tại → các trạng thái ĐƯỢC PHÉP chuyển sang. Không có trong bảng = cấm.
@@ -43,12 +48,13 @@ export async function confirmBooking(bookingId: string, actor: Actor): Promise<v
       throw new AdminBookingError("HOLD_EXPIRED", "Đơn đã quá hạn giữ chỗ, không thể xác nhận.");
     }
 
-    await compareAndSet(tx, bookingId, booking.status, { status: "CONFIRMED" });
+    // Thêm điều kiện "còn hạn" vào chính câu UPDATE: nếu đúng lúc này job vừa cho hết hạn thì không xác nhận nhầm
+    await compareAndSet(tx, bookingId, booking.status, { status: "CONFIRMED" }, { expiresAt: { gt: new Date() } });
     await recordTransition(tx, {
       bookingId,
       from: booking.status,
       to: "CONFIRMED",
-      actor,
+      actor: staffRef(actor),
       action: "booking.confirm",
     });
   });
@@ -81,12 +87,60 @@ export async function cancelBooking(bookingId: string, actor: Actor, reason: str
       bookingId,
       from: booking.status,
       to: "CANCELLED",
-      actor,
+      actor: staffRef(actor),
       action: "booking.cancel",
       note: reason,
       metadata: { reason, seatsReleased: booking.quantity },
     });
   });
+}
+
+// ── HẾT HẠN GIỮ CHỖ (PENDING → EXPIRED) + TRẢ CHỖ — do job tự động gọi ──
+// Khách giữ chỗ nhưng không được xác nhận kịp → trả chỗ để người khác đặt.
+// An toàn khi chạy lặp lại, hoặc 2 job chạy chồng nhau: compare-and-set đảm bảo mỗi đơn chỉ hết hạn MỘT lần.
+export async function expireOverdueBookings({ now = new Date(), limit = 500 } = {}) {
+  // Bước 1: tìm ứng viên (chỉ ĐỌC — chưa thay đổi gì, nên kết quả có thể đã cũ khi xử lý tới)
+  const candidates = await prisma.booking.findMany({
+    where: { status: "PENDING", expiresAt: { lte: now } },
+    orderBy: { expiresAt: "asc" },
+    take: limit,
+    select: { id: true },
+  });
+
+  // Bước 2: xử lý TỪNG đơn trong transaction riêng → một đơn lỗi không kéo cả mẻ rollback
+  let expired = 0;
+  for (const { id } of candidates) {
+    if (await expireOne(id, now)) expired++;
+  }
+  return { scanned: candidates.length, expired };
+}
+
+async function expireOne(bookingId: string, now: Date): Promise<boolean> {
+  try {
+    await prisma.$transaction(async (tx) => {
+      const booking = await findForUpdate(tx, bookingId);
+      // Kiểm tra lại cả "còn hạn không": giữa bước 1 và bây giờ, nhân viên có thể đã xác nhận/huỷ đơn
+      await compareAndSet(tx, bookingId, "PENDING", { status: "EXPIRED" }, { expiresAt: { lte: now } });
+      await tx.session.update({
+        where: { id: booking.sessionId },
+        data: { seatsBooked: { decrement: booking.quantity } },
+      });
+      await recordTransition(tx, {
+        bookingId,
+        from: "PENDING",
+        to: "EXPIRED",
+        actor: SYSTEM,
+        action: "booking.expire",
+        note: "Hết hạn giữ chỗ",
+        metadata: { seatsReleased: booking.quantity },
+      });
+    });
+    return true;
+  } catch (e) {
+    // Người khác đã đổi trạng thái trước (xác nhận/huỷ/job khác) → không phải lỗi, bỏ qua đơn này
+    if (e instanceof AdminBookingError && (e.code === "CONFLICT" || e.code === "NOT_FOUND")) return false;
+    throw e;
+  }
 }
 
 // ── Các bước dùng chung ───────────────────────────────────
@@ -115,8 +169,9 @@ async function compareAndSet(
   bookingId: string,
   expected: BookingStatus,
   data: Prisma.BookingUpdateManyMutationInput,
+  extraWhere: Prisma.BookingWhereInput = {},
 ) {
-  const { count } = await tx.booking.updateMany({ where: { id: bookingId, status: expected }, data });
+  const { count } = await tx.booking.updateMany({ where: { ...extraWhere, id: bookingId, status: expected }, data });
   if (count === 0) {
     throw new AdminBookingError("CONFLICT", "Đơn vừa được người khác cập nhật. Vui lòng tải lại trang.");
   }
@@ -130,7 +185,7 @@ async function recordTransition(
     bookingId: string;
     from: BookingStatus;
     to: BookingStatus;
-    actor: Actor;
+    actor: ActorRef;
     action: string;
     note?: string;
     metadata?: Prisma.InputJsonObject;
@@ -141,15 +196,15 @@ async function recordTransition(
       bookingId: t.bookingId,
       fromStatus: t.from,
       toStatus: t.to,
-      actorType: t.actor.role,
-      actorUserId: t.actor.id,
+      actorType: t.actor.type,
+      actorUserId: t.actor.userId,
       note: t.note,
     },
   });
   await tx.auditLog.create({
     data: {
-      actorType: t.actor.role,
-      actorUserId: t.actor.id,
+      actorType: t.actor.type,
+      actorUserId: t.actor.userId,
       action: t.action,
       entityType: "Booking",
       entityId: t.bookingId,

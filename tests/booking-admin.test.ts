@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createBooking } from "@/lib/booking";
-import { type Actor, cancelBooking, confirmBooking } from "@/lib/booking-admin";
+import { type Actor, cancelBooking, confirmBooking, expireOverdueBookings } from "@/lib/booking-admin";
 import { prisma } from "@/lib/prisma";
 
 let staff: Actor;
@@ -200,5 +200,86 @@ describe("CẠNH TRANH: nhiều nhân viên thao tác cùng một đơn cùng l�
     expect(history).toBe(2); // PENDING (lúc tạo) + đúng 1 thay đổi
     // Thắng là xác nhận → chỗ vẫn giữ; thắng là huỷ → chỗ được trả
     expect(await seatsBooked(sessionId)).toBe(after.status === "CONFIRMED" ? 2 : 0);
+  });
+});
+
+describe("job hết hạn giữ chỗ (expireOverdueBookings)", () => {
+  const makeOverdue = (id: string) =>
+    prisma.booking.update({ where: { id }, data: { expiresAt: new Date(Date.now() - 60_000) } });
+
+  it("đơn PENDING quá hạn → EXPIRED, trả chỗ, lịch sử ghi SYSTEM + audit log", async () => {
+    const { booking, sessionId } = await setup(3);
+    await makeOverdue(booking.id);
+
+    expect(await expireOverdueBookings()).toEqual({ scanned: 1, expired: 1 });
+
+    const after = await prisma.booking.findUniqueOrThrow({
+      where: { id: booking.id },
+      include: { statusHistory: { orderBy: { createdAt: "asc" } } },
+    });
+    expect(after.status).toBe("EXPIRED");
+    expect(after.statusHistory.at(-1)).toMatchObject({ fromStatus: "PENDING", toStatus: "EXPIRED", actorType: "SYSTEM", actorUserId: null });
+    expect(await prisma.auditLog.count({ where: { entityId: booking.id, action: "booking.expire", actorType: "SYSTEM" } })).toBe(1);
+    expect(await seatsBooked(sessionId)).toBe(0);
+  });
+
+  it("KHÔNG đụng tới: đơn còn hạn, đơn đã xác nhận, đơn đã huỷ", async () => {
+    const stillValid = await setup(1);
+    const confirmed = await setup(1);
+    await confirmBooking(confirmed.booking.id, staff);
+    await makeOverdue(confirmed.booking.id); // đã xác nhận rồi thì hạn giữ chỗ không còn ý nghĩa
+    const cancelled = await setup(1);
+    await cancelBooking(cancelled.booking.id, staff, "lý do");
+    await makeOverdue(cancelled.booking.id);
+
+    expect(await expireOverdueBookings()).toEqual({ scanned: 0, expired: 0 });
+
+    const statuses = await prisma.booking.findMany({ select: { id: true, status: true } });
+    const statusOf = (id: string) => statuses.find((b) => b.id === id)?.status;
+    expect(statusOf(stillValid.booking.id)).toBe("PENDING");
+    expect(statusOf(confirmed.booking.id)).toBe("CONFIRMED");
+    expect(statusOf(cancelled.booking.id)).toBe("CANCELLED");
+  });
+
+  it("chạy lại lần 2 → không làm gì thêm, chỗ không bị trả 2 lần", async () => {
+    const { booking, sessionId } = await setup(2);
+    await prisma.session.update({ where: { id: sessionId }, data: { seatsBooked: { increment: 3 } } }); // đơn khác giữ 3
+    await makeOverdue(booking.id);
+
+    await expireOverdueBookings();
+    expect(await expireOverdueBookings()).toEqual({ scanned: 0, expired: 0 });
+    expect(await seatsBooked(sessionId)).toBe(3);
+  });
+
+  it("2 job chạy CHỒNG NHAU → mỗi đơn hết hạn đúng 1 lần", async () => {
+    const { booking, sessionId } = await setup(2);
+    await prisma.session.update({ where: { id: sessionId }, data: { seatsBooked: { increment: 3 } } });
+    await makeOverdue(booking.id);
+
+    const results = await raceOnBooking(booking.id, [() => expireOverdueBookings(), () => expireOverdueBookings()]);
+
+    const total = results.reduce((n, r) => n + (r.status === "fulfilled" ? (r.value as { expired: number }).expired : 0), 0);
+    expect(results.every((r) => r.status === "fulfilled")).toBe(true); // bên thua bỏ qua êm, không văng lỗi
+    expect(total).toBe(1);
+    expect(await seatsBooked(sessionId)).toBe(3);
+  });
+
+  it("nhân viên xác nhận và job hết hạn chạy cùng lúc (đúng lúc hết hạn) → chỉ một bên thắng", async () => {
+    const { booking, sessionId } = await setup(2);
+    // Hạn giữ chỗ còn 300ms: nhân viên đọc thấy "còn hạn", nhưng câu UPDATE chạy khi đã quá hạn
+    await prisma.booking.update({ where: { id: booking.id }, data: { expiresAt: new Date(Date.now() + 300) } });
+
+    await raceOnBooking(booking.id, [
+      () => confirmBooking(booking.id, staff),
+      async () => {
+        await new Promise((r) => setTimeout(r, 400)); // chờ quá hạn rồi job mới quét
+        return expireOverdueBookings();
+      },
+    ]);
+
+    const after = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+    expect(["CONFIRMED", "EXPIRED"]).toContain(after.status);
+    expect(await seatsBooked(sessionId)).toBe(after.status === "CONFIRMED" ? 2 : 0);
+    expect(await prisma.bookingStatusHistory.count({ where: { bookingId: booking.id } })).toBe(2);
   });
 });
