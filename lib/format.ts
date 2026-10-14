@@ -1,6 +1,6 @@
 // Định dạng hiển thị cho người Việt. Luôn ép múi giờ Việt Nam,
 // vì server có thể chạy ở múi giờ khác (Docker mặc định là UTC).
-const TIME_ZONE = "Asia/Ho_Chi_Minh";
+export const TIME_ZONE = "Asia/Ho_Chi_Minh";
 
 const vndFormatter = new Intl.NumberFormat("vi-VN", {
   style: "currency",

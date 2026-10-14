@@ -9,9 +9,9 @@ export default function AdminPanelLayout({ children }: LayoutProps<"/admin">) {
   return (
     <div className="min-h-full bg-stone-100">
       <div className="border-b border-stone-200 bg-white">
-        <div className="mx-auto flex h-12 max-w-6xl items-center gap-6 px-4 text-sm">
+        <div className="mx-auto flex min-h-12 max-w-6xl flex-wrap items-center gap-x-6 gap-y-1 px-4 py-2 text-sm whitespace-nowrap">
           <span className="font-semibold text-stone-900">Quản trị</span>
-          <nav className="flex gap-4 text-stone-600">
+          <nav className="flex flex-wrap gap-x-4 gap-y-1 text-stone-600">
             <Link href="/admin" className="hover:text-stone-900">
               Tổng quan
             </Link>
@@ -39,9 +39,14 @@ async function AdminOnlyLinks() {
   const user = await requireUser();
   if (user.role !== "ADMIN") return null;
   return (
-    <Link href="/admin/experiences" className="hover:text-stone-900">
-      Trải nghiệm
-    </Link>
+    <>
+      <Link href="/admin/experiences" className="hover:text-stone-900">
+        Trải nghiệm
+      </Link>
+      <Link href="/admin/reports" className="hover:text-stone-900">
+        Doanh thu
+      </Link>
+    </>
   );
 }
 
