@@ -2,15 +2,11 @@
 // File này KHÔNG tự kiểm tra đăng nhập — Server Action gọi requireUser() rồi truyền "actor" (ai đang làm) vào đây.
 // Nhưng QUY TẮC NGHIỆP VỤ (trạng thái nào được sang trạng thái nào, vai trò nào được làm gì) nằm ở đây → test được.
 import { Prisma } from "@/generated/prisma/client";
-import type { ActorType, BookingStatus, UserRole } from "@/generated/prisma/enums";
+import type { BookingStatus } from "@/generated/prisma/enums";
+import { type Actor, type ActorRef, SYSTEM, staffRef, writeAuditLog } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
 
-export type Actor = { id: string; role: UserRole };
-
-// Ai thực hiện thay đổi — để ghi lịch sử/audit log. Nhân viên có userId; hệ thống (job tự động) thì không.
-type ActorRef = { type: ActorType; userId: string | null };
-const staffRef = (a: Actor): ActorRef => ({ type: a.role, userId: a.id });
-const SYSTEM: ActorRef = { type: "SYSTEM", userId: null };
+export type { Actor };
 
 // ── MÁY TRẠNG THÁI ─────────────────────────────────────────
 // Trạng thái hiện tại → các trạng thái ĐƯỢC PHÉP chuyển sang. Không có trong bảng = cấm.
@@ -201,15 +197,12 @@ async function recordTransition(
       note: t.note,
     },
   });
-  await tx.auditLog.create({
-    data: {
-      actorType: t.actor.type,
-      actorUserId: t.actor.userId,
-      action: t.action,
-      entityType: "Booking",
-      entityId: t.bookingId,
-      metadata: { from: t.from, to: t.to, ...t.metadata },
-    },
+  await writeAuditLog(tx, {
+    actor: t.actor,
+    action: t.action,
+    entityType: "Booking",
+    entityId: t.bookingId,
+    metadata: { from: t.from, to: t.to, ...t.metadata },
   });
 }
 

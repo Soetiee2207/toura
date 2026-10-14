@@ -31,3 +31,10 @@ export function formatDuration(minutes: number): string {
   if (h === 0) return `${m} phút`;
   return m === 0 ? `${h} giờ` : `${h} giờ ${m} phút`;
 }
+
+// Ô <input type="datetime-local"> gửi lên chuỗi "2026-10-20T18:00" — KHÔNG có múi giờ.
+// Toura quy ước: mọi giờ nhân viên gõ là giờ Việt Nam. Việt Nam cố định UTC+7, không có giờ mùa hè
+// → gắn "+07:00" là đủ, không phụ thuộc múi giờ của máy chủ (Docker thường chạy UTC).
+export function parseVNDateTimeInput(value: string): Date {
+  return new Date(`${value}:00+07:00`); // "2026-10-20T18:00" giờ VN → thời điểm tuyệt đối
+}

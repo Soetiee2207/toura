@@ -4,22 +4,29 @@ import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
 // /admin — trang tổng quan. Bấm vào từng ô → danh sách đơn đã lọc theo trạng thái.
-export default function AdminHomePage() {
+export default function AdminHomePage({ searchParams }: PageProps<"/admin">) {
   return (
     <Suspense fallback={<div className="h-40 animate-pulse rounded-xl bg-stone-200" />}>
-      <Overview />
+      <Overview searchParams={searchParams} />
     </Suspense>
   );
 }
 
-async function Overview() {
+async function Overview({ searchParams }: { searchParams: PageProps<"/admin">["searchParams"] }) {
   const user = await requireUser(); // KHÔNG dựa vào proxy.ts — mỗi trang tự kiểm tra
+  // requireUser(roles) chuyển về đây với ?error=forbidden khi sai vai trò
+  const forbidden = (await searchParams).error === "forbidden";
 
   const counts = await prisma.booking.groupBy({ by: ["status"], _count: { _all: true } });
   const count = (s: string) => counts.find((c) => c.status === s)?._count._all ?? 0;
 
   return (
     <div>
+      {forbidden && (
+        <p role="alert" className="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          Bạn không có quyền vào trang đó.
+        </p>
+      )}
       <h1 className="text-2xl font-bold tracking-tight">Xin chào, {user.name}</h1>
       <ul className="mt-6 grid gap-4 sm:grid-cols-4">
         <Stat label="Đang giữ chỗ" status="PENDING" value={count("PENDING")} accent="text-amber-700" />

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createBooking } from "@/lib/booking";
 import { type Actor, cancelBooking, confirmBooking, expireOverdueBookings } from "@/lib/booking-admin";
 import { prisma } from "@/lib/prisma";
+import { raceOnRow } from "./helpers";
 
 let staff: Actor;
 let admin: Actor;
@@ -36,39 +37,6 @@ async function setup(quantity = 2) {
 
 const seatsBooked = async (sessionId: string) =>
   (await prisma.session.findUniqueOrThrow({ where: { id: sessionId } })).seatsBooked;
-
-// ÉP CUỘC ĐUA XẢY RA THẬT: chạy nhanh quá thì các request nối đuôi nhau, không bao giờ "đụng" nhau.
-// 1) Một transaction "người gác" khoá dòng đơn (SELECT ... FOR UPDATE).
-// 2) Chạy các tác vụ: tất cả đều ĐỌC được trạng thái cũ (Postgres không chặn việc đọc) rồi KẸT ở bước UPDATE.
-// 3) Chờ tới khi đủ `tasks.length` request đang kẹt, mới thả khoá → chúng ùa vào cùng lúc.
-async function raceOnBooking(bookingId: string, tasks: (() => Promise<unknown>)[]) {
-  let release!: () => void;
-  let locked!: () => void;
-  const gate = new Promise<void>((r) => (release = r));
-  const lockAcquired = new Promise<void>((r) => (locked = r));
-
-  const guard = prisma.$transaction(
-    async (tx) => {
-      await tx.$queryRaw`SELECT id FROM bookings WHERE id = ${bookingId}::uuid FOR UPDATE`;
-      locked();
-      await gate;
-    },
-    { timeout: 10_000 },
-  );
-  await lockAcquired;
-
-  const results = Promise.allSettled(tasks.map((t) => t()));
-  for (let i = 0; i < 200; i++) {
-    const [{ waiting }] = await prisma.$queryRaw<{ waiting: number }[]>`
-      SELECT count(*)::int AS waiting FROM pg_stat_activity
-      WHERE datname = current_database() AND wait_event_type = 'Lock'`;
-    if (waiting >= tasks.length) break;
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  release();
-  await guard;
-  return results;
-}
 
 async function cleanDatabase() {
   await prisma.auditLog.deleteMany();
@@ -174,7 +142,8 @@ describe("CẠNH TRANH: nhiều nhân viên thao tác cùng một đơn cùng l�
     // Buổi có đơn khác giữ 2 chỗ nữa → nếu trả chỗ 2 lần, seats_booked sẽ sai (2 - 2 - 2 ... )
     await prisma.session.update({ where: { id: sessionId }, data: { seatsBooked: { increment: 2 } } });
 
-    const results = await raceOnBooking(
+    const results = await raceOnRow(
+      "bookings",
       booking.id,
       Array.from({ length: 5 }, () => () => cancelBooking(booking.id, admin, "huỷ đồng thời")),
     );
@@ -188,7 +157,7 @@ describe("CẠNH TRANH: nhiều nhân viên thao tác cùng một đơn cùng l�
   it("một người Xác nhận, một người Huỷ cùng lúc → chỉ một bên thắng, dữ liệu nhất quán", async () => {
     const { booking, sessionId } = await setup(2);
 
-    const results = await raceOnBooking(booking.id, [
+    const results = await raceOnRow("bookings", booking.id, [
       () => confirmBooking(booking.id, staff),
       () => cancelBooking(booking.id, staff, "huỷ"),
     ]);
@@ -256,7 +225,7 @@ describe("job hết hạn giữ chỗ (expireOverdueBookings)", () => {
     await prisma.session.update({ where: { id: sessionId }, data: { seatsBooked: { increment: 3 } } });
     await makeOverdue(booking.id);
 
-    const results = await raceOnBooking(booking.id, [() => expireOverdueBookings(), () => expireOverdueBookings()]);
+    const results = await raceOnRow("bookings", booking.id, [() => expireOverdueBookings(), () => expireOverdueBookings()]);
 
     const total = results.reduce((n, r) => n + (r.status === "fulfilled" ? (r.value as { expired: number }).expired : 0), 0);
     expect(results.every((r) => r.status === "fulfilled")).toBe(true); // bên thua bỏ qua êm, không văng lỗi
@@ -269,7 +238,7 @@ describe("job hết hạn giữ chỗ (expireOverdueBookings)", () => {
     // Hạn giữ chỗ còn 300ms: nhân viên đọc thấy "còn hạn", nhưng câu UPDATE chạy khi đã quá hạn
     await prisma.booking.update({ where: { id: booking.id }, data: { expiresAt: new Date(Date.now() + 300) } });
 
-    await raceOnBooking(booking.id, [
+    await raceOnRow("bookings", booking.id, [
       () => confirmBooking(booking.id, staff),
       async () => {
         await new Promise((r) => setTimeout(r, 400)); // chờ quá hạn rồi job mới quét

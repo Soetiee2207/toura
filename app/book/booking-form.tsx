@@ -2,6 +2,7 @@
 // Form đặt chỗ. Client Component vì cần: hiện trạng thái "đang gửi", hiện lỗi ngay dưới từng ô.
 
 import { useActionState, useState } from "react";
+import { Field } from "@/components/field";
 import { MAX_TICKETS_PER_BOOKING } from "@/lib/booking-schema";
 import { formatVND } from "@/lib/format";
 import { submitBooking, type BookingFormState } from "./actions";
@@ -77,15 +78,5 @@ export function BookingForm({ idempotencyKey, sessionId, price, seatsLeft, initi
         Chưa cần thanh toán. Chúng tôi sẽ liên hệ để xác nhận đơn.
       </p>
     </form>
-  );
-}
-
-function Field({ label, error, children }: { label: string; error?: string; children: React.ReactNode }) {
-  return (
-    <label className="block">
-      <span className="mb-1 block text-sm font-medium">{label}</span>
-      {children}
-      {error && <span className="mt-1 block text-sm text-red-700">{error}</span>}
-    </label>
   );
 }

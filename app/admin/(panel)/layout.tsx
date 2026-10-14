@@ -18,6 +18,9 @@ export default function AdminPanelLayout({ children }: LayoutProps<"/admin">) {
             <Link href="/admin/bookings" className="hover:text-stone-900">
               Đơn đặt chỗ
             </Link>
+            <Suspense fallback={null}>
+              <AdminOnlyLinks />
+            </Suspense>
           </nav>
           <div className="ml-auto">
             <Suspense fallback={null}>
@@ -28,6 +31,17 @@ export default function AdminPanelLayout({ children }: LayoutProps<"/admin">) {
       </div>
       <div className="mx-auto max-w-6xl px-4 py-6">{children}</div>
     </div>
+  );
+}
+
+// Link chỉ ADMIN thấy. Ẩn link chỉ cho gọn giao diện — trang/action vẫn tự requireUser(["ADMIN"]).
+async function AdminOnlyLinks() {
+  const user = await requireUser();
+  if (user.role !== "ADMIN") return null;
+  return (
+    <Link href="/admin/experiences" className="hover:text-stone-900">
+      Trải nghiệm
+    </Link>
   );
 }
 
