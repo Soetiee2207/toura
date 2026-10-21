@@ -80,24 +80,30 @@ async function findReplay(input: CreateBookingInput): Promise<{ code: string } |
   return { code: existing.code };
 }
 
+// GIỮ CHỖ: một câu SQL duy nhất vừa KIỂM TRA vừa GHI (atomic). Trả về số dòng được cập nhật (0 = không giữ được).
+// Điều kiện trong WHERE chính là quy tắc "buổi còn đặt được" (xem bookableSessionWhere ở lib/catalog.ts),
+// cộng thêm "đủ chỗ cho quantity người". Postgres khoá dòng session này cho tới khi transaction kết thúc,
+// nên 2 khách đặt cùng lúc sẽ phải XẾP HÀNG, người sau thấy số chỗ đã bị người trước trừ.
+// Dùng ở 2 nơi: khách đặt chỗ, và tiền chuyển khoản về TRỄ cho đơn đã hết hạn (lib/payments.ts).
+export function reserveSeats(tx: Prisma.TransactionClient, sessionId: string, quantity: number): Promise<number> {
+  return tx.$executeRaw`
+    UPDATE sessions s
+    SET seats_booked = s.seats_booked + ${quantity}, updated_at = now()
+    WHERE s.id = ${sessionId}::uuid
+      AND s.status = 'OPEN'
+      AND s.starts_at > now()
+      AND s.seats_booked + ${quantity} <= s.capacity
+      AND EXISTS (SELECT 1 FROM experiences e WHERE e.id = s.experience_id AND e.is_published)
+  `;
+}
+
 async function createBookingOnce(input: CreateBookingInput, code: string) {
   const { sessionId, quantity } = input;
 
   // $transaction: tất cả câu lệnh bên trong cùng thành công, hoặc cùng bị huỷ (ROLLBACK).
   return prisma.$transaction(async (tx) => {
-    // ── BƯỚC 1: GIỮ CHỖ — một câu SQL duy nhất vừa KIỂM TRA vừa GHI (atomic) ──
-    // Điều kiện trong WHERE chính là quy tắc "buổi còn đặt được" (xem bookableSessionWhere ở lib/catalog.ts),
-    // cộng thêm "đủ chỗ cho quantity người". Postgres khoá dòng session này cho tới khi transaction kết thúc,
-    // nên 2 khách đặt cùng lúc sẽ phải XẾP HÀNG, người sau thấy số chỗ đã bị người trước trừ.
-    const reserved = await tx.$executeRaw`
-      UPDATE sessions s
-      SET seats_booked = s.seats_booked + ${quantity}, updated_at = now()
-      WHERE s.id = ${sessionId}::uuid
-        AND s.status = 'OPEN'
-        AND s.starts_at > now()
-        AND s.seats_booked + ${quantity} <= s.capacity
-        AND EXISTS (SELECT 1 FROM experiences e WHERE e.id = s.experience_id AND e.is_published)
-    `;
+    // ── BƯỚC 1: GIỮ CHỖ — một câu SQL duy nhất vừa KIỂM TRA vừa GHI (atomic), xem reserveSeats ──
+    const reserved = await reserveSeats(tx, sessionId, quantity);
 
     if (reserved === 0) {
       // Không giữ được chỗ → tìm lý do để báo khách cho đúng

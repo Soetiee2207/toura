@@ -219,6 +219,7 @@ model WebhookEvent {
   providerEventId String    @map("provider_event_id")
   payload         Json // nguyên văn nội dung nhận được
   signatureValid  Boolean   @map("signature_valid")
+  outcome         String? // kết quả xử lý: CONFIRMED, PARTIAL, REFUND_PENDING, UNMATCHED, IGNORED (xem lib/payments.ts)
   processedAt     DateTime? @map("processed_at") @db.Timestamptz
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
 

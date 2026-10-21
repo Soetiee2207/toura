@@ -3,19 +3,23 @@
 // Nhưng QUY TẮC NGHIỆP VỤ (trạng thái nào được sang trạng thái nào, vai trò nào được làm gì) nằm ở đây → test được.
 import { Prisma } from "@/generated/prisma/client";
 import type { BookingStatus } from "@/generated/prisma/enums";
-import { type Actor, type ActorRef, SYSTEM, staffRef, writeAuditLog } from "@/lib/audit";
+import { type Actor, SYSTEM, staffRef } from "@/lib/audit";
+import { recordTransition } from "@/lib/booking-history";
+import { markBookingPaymentsForRefund } from "@/lib/payments";
 import { prisma } from "@/lib/prisma";
 
 export type { Actor };
 
 // ── MÁY TRẠNG THÁI ─────────────────────────────────────────
 // Trạng thái hiện tại → các trạng thái ĐƯỢC PHÉP chuyển sang. Không có trong bảng = cấm.
-// CANCELLED và EXPIRED là "điểm cuối": đơn đã huỷ không thể sống lại (muốn đi thì đặt đơn mới).
+// CANCELLED là "điểm cuối": đơn đã huỷ không thể sống lại (muốn đi thì đặt đơn mới).
+// EXPIRED → CONFIRMED chỉ có MỘT đường: tiền chuyển khoản về trễ mà buổi vẫn còn chỗ (lib/payments.ts).
+// Nhân viên không xác nhận tay được đơn đã hết hạn (confirmBooking chặn bằng HOLD_EXPIRED).
 const TRANSITIONS: Record<BookingStatus, BookingStatus[]> = {
   PENDING: ["CONFIRMED", "CANCELLED", "EXPIRED"],
   CONFIRMED: ["CANCELLED"],
   CANCELLED: [],
-  EXPIRED: [],
+  EXPIRED: ["CONFIRMED"],
 };
 
 export function canTransition(from: BookingStatus, to: BookingStatus): boolean {
@@ -78,6 +82,8 @@ export async function cancelBooking(bookingId: string, actor: Actor, reason: str
       where: { id: booking.sessionId },
       data: { seatsBooked: { decrement: booking.quantity } },
     });
+    // Khách đã chuyển tiền (đủ hoặc một phần) → toàn bộ chờ hoàn
+    const refundPending = await markBookingPaymentsForRefund(tx, bookingId, `Đơn bị huỷ: ${reason}`);
 
     await recordTransition(tx, {
       bookingId,
@@ -86,7 +92,7 @@ export async function cancelBooking(bookingId: string, actor: Actor, reason: str
       actor: staffRef(actor),
       action: "booking.cancel",
       note: reason,
-      metadata: { reason, seatsReleased: booking.quantity },
+      metadata: { reason, seatsReleased: booking.quantity, refundPending },
     });
   });
 }
@@ -121,6 +127,8 @@ async function expireOne(bookingId: string, now: Date): Promise<boolean> {
         where: { id: booking.sessionId },
         data: { seatsBooked: { decrement: booking.quantity } },
       });
+      // Khách mới chuyển MỘT PHẦN rồi hết hạn → phần đã chuyển chờ hoàn
+      const refundPending = await markBookingPaymentsForRefund(tx, bookingId, "Hết hạn giữ chỗ khi chưa thanh toán đủ");
       await recordTransition(tx, {
         bookingId,
         from: "PENDING",
@@ -128,7 +136,7 @@ async function expireOne(bookingId: string, now: Date): Promise<boolean> {
         actor: SYSTEM,
         action: "booking.expire",
         note: "Hết hạn giữ chỗ",
-        metadata: { seatsReleased: booking.quantity },
+        metadata: { seatsReleased: booking.quantity, refundPending },
       });
     });
     return true;
@@ -171,39 +179,6 @@ async function compareAndSet(
   if (count === 0) {
     throw new AdminBookingError("CONFLICT", "Đơn vừa được người khác cập nhật. Vui lòng tải lại trang.");
   }
-}
-
-// Ghi LỊCH SỬ TRẠNG THÁI (cho đơn) + AUDIT LOG (cho cả hệ thống) — cùng transaction với thay đổi:
-// thay đổi thành công thì chắc chắn có dấu vết; thay đổi bị huỷ thì dấu vết cũng biến mất.
-async function recordTransition(
-  tx: Prisma.TransactionClient,
-  t: {
-    bookingId: string;
-    from: BookingStatus;
-    to: BookingStatus;
-    actor: ActorRef;
-    action: string;
-    note?: string;
-    metadata?: Prisma.InputJsonObject;
-  },
-) {
-  await tx.bookingStatusHistory.create({
-    data: {
-      bookingId: t.bookingId,
-      fromStatus: t.from,
-      toStatus: t.to,
-      actorType: t.actor.type,
-      actorUserId: t.actor.userId,
-      note: t.note,
-    },
-  });
-  await writeAuditLog(tx, {
-    actor: t.actor,
-    action: t.action,
-    entityType: "Booking",
-    entityId: t.bookingId,
-    metadata: { from: t.from, to: t.to, ...t.metadata },
-  });
 }
 
 // ── ĐỌC DỮ LIỆU CHO TRANG QUẢN TRỊ ─────────────────────────
