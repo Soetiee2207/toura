@@ -13,6 +13,7 @@ import { Prisma } from "@/generated/prisma/client";
 import { SYSTEM, writeAuditLog } from "@/lib/audit";
 import { reserveSeats } from "@/lib/booking";
 import { recordTransition } from "@/lib/booking-history";
+import { summarizePayments } from "@/lib/payment-summary";
 import { prisma } from "@/lib/prisma";
 import { extractBookingCode, type SepayTransfer } from "@/lib/sepay";
 
@@ -135,13 +136,13 @@ async function applyTransfer(tx: Prisma.TransactionClient, t: SepayTransfer): Pr
   return { outcome: "CONFIRMED", ...ctx };
 }
 
-// Tiền đơn ĐANG GIỮ = các khoản đã thu, trừ phần đã/đang chờ hoàn.
+// Tiền đơn ĐANG GIỮ = các khoản đã thu, trừ phần đã/đang chờ hoàn (công thức ở lib/payment-summary.ts).
 async function keptAmount(tx: Prisma.TransactionClient, bookingId: string): Promise<number> {
   const payments = await tx.payment.findMany({
-    where: { bookingId, status: { in: ["SUCCEEDED", "REFUND_PENDING"] } },
-    select: { amount: true, refundAmount: true },
+    where: { bookingId },
+    select: { amount: true, status: true, refundAmount: true },
   });
-  return payments.reduce((sum, p) => sum + p.amount - (p.refundAmount ?? 0), 0);
+  return summarizePayments(payments).kept;
 }
 
 async function markForRefund(tx: Prisma.TransactionClient, paymentId: string, refundAmount: number, reason: string) {

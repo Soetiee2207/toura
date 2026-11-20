@@ -1,10 +1,19 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { POST } from "@/app/api/webhooks/sepay/route";
-import { createBooking } from "@/lib/booking";
+import { createBooking, getBookingByCode } from "@/lib/booking";
 import { type Actor, cancelBooking, expireOverdueBookings } from "@/lib/booking-admin";
 import { processSepayTransfer } from "@/lib/payments";
 import { prisma } from "@/lib/prisma";
-import { extractBookingCode, type SepayTransfer, signSepayBody, transferContentFor, verifySepaySignature } from "@/lib/sepay";
+import { summarizePayments } from "@/lib/payment-summary";
+import {
+  bankAccountFromEnv,
+  extractBookingCode,
+  type SepayTransfer,
+  sepayQrUrl,
+  signSepayBody,
+  transferContentFor,
+  verifySepaySignature,
+} from "@/lib/sepay";
 import { raceOnRow } from "./helpers";
 
 // Giả lập lỗi TẠM THỜI giữa chừng (vd: DB rớt kết nối) ở bước ghi lịch sử — SAU khi đã ghi sự kiện + tiền.
@@ -343,5 +352,46 @@ describe("route POST /api/webhooks/sepay", () => {
   it("chữ ký đúng nhưng payload sai định dạng → 400", async () => {
     const body = JSON.stringify({ id: 1, hello: "world" });
     expect((await POST(request(body, signed(body)))).status).toBe(400);
+  });
+});
+
+describe("trang thanh toán của khách", () => {
+  it("tóm tắt tiền: chỉ tính khoản đã thu, trừ phần chờ hoàn; khoản PENDING/FAILED không tính", () => {
+    expect(
+      summarizePayments([
+        { amount: 100_000, status: "SUCCEEDED", refundAmount: null },
+        { amount: 150_000, status: "REFUND_PENDING", refundAmount: 50_000 }, // chuyển thừa 50k
+        { amount: 999_000, status: "FAILED", refundAmount: null },
+        { amount: 999_000, status: "PENDING", refundAmount: null },
+      ]),
+    ).toEqual({ kept: 200_000, refundPending: 50_000 });
+  });
+
+  it("đơn mới → còn phải chuyển đủ; chuyển thiếu → chỉ còn phải chuyển BÙ phần thiếu", async () => {
+    const { code, total } = await setup();
+    expect(await getBookingByCode(code)).toMatchObject({ paidAmount: 0, amountDue: total, refundPending: 0 });
+
+    await processSepayTransfer(transfer(transferContentFor(code), 60_000));
+    expect(await getBookingByCode(code)).toMatchObject({ status: "PENDING", paidAmount: 60_000, amountDue: total - 60_000 });
+  });
+
+  it("đơn hết hạn có tiền chờ hoàn → trang hiện đúng số tiền chờ hoàn", async () => {
+    const { code } = await setup();
+    await processSepayTransfer(transfer(transferContentFor(code), 60_000));
+    await expire(code);
+    expect(await getBookingByCode(code)).toMatchObject({ status: "EXPIRED", paidAmount: 0, refundPending: 60_000 });
+  });
+
+  it("thiếu biến môi trường tài khoản nhận tiền → null (trang báo chưa cấu hình, không vẽ QR sai)", () => {
+    const full = { SEPAY_BANK_ACCOUNT: "0123456789", SEPAY_BANK_CODE: "MBBank", SEPAY_ACCOUNT_NAME: "NGUYEN VAN A" };
+    expect(bankAccountFromEnv(full)).toEqual({ accountNumber: "0123456789", bank: "MBBank", accountName: "NGUYEN VAN A" });
+    expect(bankAccountFromEnv({ ...full, SEPAY_BANK_CODE: " " })).toBeNull();
+  });
+
+  it("URL mã QR có đủ tài khoản, ngân hàng, số tiền, nội dung — và nội dung tìm lại được đúng mã đơn", () => {
+    const url = new URL(sepayQrUrl({ accountNumber: "0123456789", bank: "MBBank", accountName: "X" }, 200_000, "TRA7X3K9A"));
+    expect(url.origin + url.pathname).toBe("https://qr.sepay.vn/img");
+    expect(Object.fromEntries(url.searchParams)).toEqual({ acc: "0123456789", bank: "MBBank", amount: "200000", des: "TRA7X3K9A" });
+    expect(extractBookingCode(url.searchParams.get("des"))).toBe("TRA-7X3K9A");
   });
 });

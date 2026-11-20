@@ -65,3 +65,28 @@ export function extractBookingCode(text: string | null | undefined): string | nu
 export function transferContentFor(bookingCode: string): string {
   return bookingCode.replace("-", "");
 }
+
+// ── TÀI KHOẢN NHẬN TIỀN + MÃ QR ────────────────────────────
+// Đọc từ .env (không hard-code số tài khoản vào code). Thiếu biến nào → null → trang khách báo "chưa cấu hình".
+export type BankAccount = { accountNumber: string; bank: string; accountName: string };
+
+export function bankAccountFromEnv(env: Record<string, string | undefined> = process.env): BankAccount | null {
+  const accountNumber = env.SEPAY_BANK_ACCOUNT?.trim();
+  const bank = env.SEPAY_BANK_CODE?.trim();
+  const accountName = env.SEPAY_ACCOUNT_NAME?.trim();
+  if (!accountNumber || !bank || !accountName) return null;
+  return { accountNumber, bank, accountName };
+}
+
+// Ảnh QR VietQR do SePay vẽ sẵn: khách quét bằng app ngân hàng → tự điền số tài khoản, số tiền, nội dung.
+// Khách KHÔNG phải gõ tay nội dung → gần như không bao giờ sai mã đơn.
+// Tài liệu: https://qr.sepay.vn — tham số: acc, bank, amount, des.
+export function sepayQrUrl(account: BankAccount, amount: number, content: string): string {
+  const params = new URLSearchParams({
+    acc: account.accountNumber,
+    bank: account.bank,
+    amount: String(amount),
+    des: content,
+  });
+  return `https://qr.sepay.vn/img?${params}`; // URLSearchParams tự mã hoá ký tự đặc biệt
+}

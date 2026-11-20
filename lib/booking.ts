@@ -4,6 +4,7 @@ import { randomInt } from "node:crypto";
 import { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { CreateBookingInput } from "@/lib/booking-schema";
+import { summarizePayments } from "@/lib/payment-summary";
 
 // Lỗi nghiệp vụ "dự kiến được" (hết chỗ, buổi đã đóng...) → trang hiển thị thông báo thân thiện.
 // Phân biệt với lỗi bất ngờ (DB sập, bug) → trang báo lỗi chung.
@@ -191,10 +192,19 @@ export async function getBookingByCode(code: string) {
       session: {
         select: { startsAt: true, experience: { select: { title: true, meetingPoint: true, slug: true } } },
       },
+      payments: { select: { amount: true, status: true, refundAmount: true } },
     },
   });
   if (!booking) return null;
 
-  const { contactEmail, contactPhone, ...rest } = booking;
-  return { ...rest, maskedEmail: maskEmail(contactEmail), maskedPhone: maskPhone(contactPhone) };
+  const { contactEmail, contactPhone, payments, ...rest } = booking;
+  const { kept, refundPending } = summarizePayments(payments);
+  return {
+    ...rest,
+    paidAmount: kept,
+    amountDue: Math.max(rest.totalAmount - kept, 0), // khách chuyển thiếu → chỉ cần chuyển BÙ phần còn lại
+    refundPending,
+    maskedEmail: maskEmail(contactEmail),
+    maskedPhone: maskPhone(contactPhone),
+  };
 }
